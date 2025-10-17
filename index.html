@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Аннотации YouTube</title>
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'none' 'sha256-1owK7x5OBRWBGfoEy7nGM+Ah68souB3EGrh0v+yxado=';
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data: https:;
+        connect-src 'self' https:;
+        worker-src 'none';
+        frame-src https:;
+    ">
+    <link rel="icon" href="data:;base64,=">
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #111;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            padding: 8px;
+            background: #222;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: right;
+            gap: 6px;
+        }
+
+        #toolbar {
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        #toolbar > label {
+            margin-right: auto;
+        }
+
+        button,
+        input[type="number"],
+        input[type="text"],
+        textarea {
+            background: #333;
+            color: #eee;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 4px 6px;
+            box-sizing: border-box;
+        }
+
+        button:hover {
+            background: #444;
+            cursor: pointer;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: row;
+            overflow: hidden;
+        }
+
+        #player {
+            flex: 2;
+            min-height: 200px;
+            border: none;
+        }
+
+        #annotations {
+            flex: 1;
+            overflow-y: auto;
+            background: #181818;
+            padding: 10px;
+        }
+
+        .annotation {
+            border-bottom: 1px solid #333;
+            padding: 8px 0;
+            transition: background 0.3s;
+            white-space: pre;
+            cursor: pointer;
+        }
+
+        .annotation.active {
+            background: #2b2b2b;
+        }
+
+        .annotation:hover {
+            background: #252525;
+        }
+
+        .annotation strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        .timecode {
+            color: gray;
+        }
+
+        .controls {
+            margin-top: 4px;
+            display: flex;
+            gap: 4px;
+            justify-content: space-between;
+        }
+
+        .controls > button {
+            transform: scaleX(-1);
+        }
+
+        .del-btn {
+            background: transparent;
+            border: none;
+        }
+
+        a {
+            color: #6cf;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            main {
+                flex-direction: column;
+            }
+
+            #player {
+                flex: none;
+                height: 50vh;
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        #export-json {
+            transition: background-color 0.3s ease;
+        }
+
+        #export-json.success {
+            background-color: #28a745;
+            transition: background-color 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+<header id="toolbar">
+    <label
+    >Видео:
+        <input
+                id="video-url"
+                type="text"
+                size="40"
+                placeholder="https://www.youtube.com/watch?v=..."
+        /></label>
+    <span>
+                <button id="import-json">Импорт</button>
+                <button id="add-annotation">Добавить</button>
+                <button id="export-json">Экспорт в буфер обмена</button>
+            </span>
+</header>
+<main>
+    <iframe id="player" allowfullscreen></iframe>
+    <div id="annotations"></div>
+</main>
+
+<script>
+    let annotations = [];
+    let player,
+        playerReady = false;
+    let activeIndex = -1;
+    let videoId = null;
+    const params = new URLSearchParams(location.search);
+    const editMode = params.has("edit");
+    const gistId = params.get("gist");
+
+    function getYouTubeID(url) {
+        const m =
+            url.match(/[?&]v=([^&]+)/) ||
+            url.match(/youtu\.be\/([^?]+)/);
+        return m ? m[1] : null;
+    }
+
+    function saveState() {
+        if (!editMode) return;
+        const state = {
+            videoUrl: document.getElementById("video-url").value,
+            annotations,
+        };
+        localStorage.setItem(
+            "annotations_state",
+            JSON.stringify(state),
+        );
+    }
+
+    function loadState() {
+        const state = JSON.parse(
+            localStorage.getItem("annotations_state") || "null",
+        );
+        if (state) {
+            annotations = state.annotations || [];
+            document.getElementById("video-url").value =
+                state.videoUrl || "";
+            if (state.videoUrl) loadVideo();
+            state.annotations.forEach(i => {
+                i.editing = false
+            })
+            renderAnnotations();
+        }
+    }
+
+    function loadVideo() {
+        const url = document.getElementById("video-url").value.trim();
+        const id = getYouTubeID(url);
+        if (!id) return alert("Неверный URL YouTube!");
+        videoId = id;
+        document.getElementById("player").src =
+            `https://www.youtube.com/embed/${id}?enablejsapi=1&playsinline=1`;
+        saveState();
+    }
+
+    function linkify(text) {
+        return text.replace(/(^|\s)https:\/\/[^\s<]+/g, (m) => {
+            const short = m.replace(/^https:\/\//, "");
+            const a = document.createElement("a")
+            a.href = "m"
+            a.target = "_blank"
+            a.text = short
+            return a.outerHTML
+        });
+    }
+
+    function renderAnnotations() {
+        const list = document.getElementById("annotations");
+        list.innerHTML = "";
+        annotations.sort((a, b) => a.time - b.time);
+        annotations.forEach((ann, i) => {
+            const div = document.createElement("div");
+            div.className =
+                "annotation" + (i === activeIndex ? " active" : "");
+
+            const titleElem = document.createElement("div");
+            const timeElem = document.createElement("div");
+            timeElem.style.marginBottom = "4px";
+            titleElem.style.marginBottom = "4px";
+
+            if (ann.editing && editMode) {
+                const timeInput = document.createElement("input");
+                timeInput.type = "number";
+                timeInput.value = ann.time;
+                timeInput.min = 0;
+                timeInput.style.width = "60px";
+                timeInput.oninput = (e) => {
+                    ann.time = parseInt(e.target.value) || 0;
+                    saveState();
+                    renderAnnotations();
+                };
+                timeInput.onclick = (e) => e.stopPropagation();
+                timeElem.append("⏱ ", timeInput);
+
+                const titleInput = document.createElement("input");
+                titleInput.type = "text";
+                titleInput.value = ann.title;
+                titleInput.style.width = "calc(100% - 80px)";
+                titleInput.oninput = (e) => {
+                    ann.title = e.target.value;
+                    saveState();
+                };
+                titleInput.onclick = (e) => e.stopPropagation();
+                titleElem.append(titleInput);
+            } else {
+                const titleSpan = document.createElement("strong");
+                titleSpan.textContent = ann.title || "(без названия)";
+                const timeSpan = document.createElement("span");
+                timeSpan.classList.add("timecode");
+
+                const seconds = ann.time % 60;
+                const secondsS = seconds.toFixed(0).padStart(2, "0");
+
+                const minutes = ann.time / 60;
+                const minutesS = minutes.toFixed(0).padStart(2, "0");
+
+                const hours = ann.time / 60 / 60;
+                const hoursS = hours.toFixed(0);
+
+                if (hours >= 1) {
+                    timeSpan.textContent = `${hoursS}:${minutesS}:${secondsS}`;
+                } else {
+                    timeSpan.textContent = `${minutesS}:${secondsS}`;
+                }
+                timeElem.append(timeSpan);
+                titleElem.append(titleSpan);
+            }
+
+            const content = document.createElement("div");
+            if (ann.editing && editMode) {
+                const ta = document.createElement("textarea");
+                ta.value = ann.html;
+                ta.rows = 6;
+                ta.style.width = "100%";
+                ta.oninput = (e) => {
+                    ann.html = e.target.value;
+                };
+                ta.onclick = (e) => e.stopPropagation();
+                content.appendChild(ta);
+            } else {
+                content.innerHTML = linkify(ann.html || "");
+            }
+
+            const controls = document.createElement("div");
+            controls.className = "controls";
+            if (editMode) {
+                const editBtn = document.createElement("button");
+                editBtn.classList.add("edit-btn")
+                editBtn.textContent = ann.editing ? "💾" : "✏️";
+                editBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    ann.editing = !ann.editing;
+                    saveState();
+                    renderAnnotations();
+                };
+                const delBtn = document.createElement("button");
+                delBtn.classList.add("del-btn")
+                delBtn.textContent = "🗑️";
+                delBtn.title = "Двойным кликом";
+                delBtn.onclick = (e) => {
+                    e.stopPropagation()
+                }
+                delBtn.ondblclick = (e) => {
+                    e.preventDefault()
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    annotations.splice(i, 1);
+                    saveState();
+                    renderAnnotations();
+                };
+                controls.append(editBtn, delBtn);
+            }
+
+            div.append(timeElem, titleElem, content, controls);
+            div.onclick = () => {
+                if (playerReady) player.seekTo(ann.time, true);
+            };
+            list.appendChild(div);
+        });
+    }
+
+    function addAnnotation() {
+        if (!playerReady) return;
+        let time = Math.floor(player.getCurrentTime());
+        while (annotations.some((a) => a.time === time)) time++;
+        const newAnn = {
+            time,
+            title: "Новая аннотация",
+            html: "",
+            editing: true,
+        };
+        annotations.push(newAnn);
+        saveState();
+        renderAnnotations();
+        const idx = annotations.findIndex(
+            (a) => a.time === newAnn.time,
+        );
+        document
+            .getElementById("annotations")
+            .children[
+            idx
+            ]?.scrollIntoView({behavior: "smooth", block: "center"});
+    }
+
+    document.getElementById("import-json").onclick = () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json";
+        input.onchange = async e => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const text = await file.text();
+            const data = JSON.parse(text);
+            annotations = data.annotations || [];
+            document.getElementById("video-url").value = data.videoUrl || "";
+            loadVideo();
+            saveState();
+            renderAnnotations();
+        };
+        input.click();
+    };
+    document.getElementById("export-json").onclick = (e) => {
+        const data = JSON.stringify(
+            {
+                videoUrl: document.getElementById("video-url").value,
+                annotations,
+            },
+            null,
+            2,
+        );
+        // const blob = new Blob([data], {type: "application/json"});
+        // const a = document.createElement("a");
+        // a.href = URL.createObjectURL(blob);
+        // a.download = "annotations.json";
+        // a.click();
+        navigator.clipboard.writeText(data).then(() => {
+            e.target.classList.add("success");
+            setTimeout(() => e.target.classList.remove("success"), 300);
+        });
+        if (gistId) {
+            // если открыли gist — ведём на страницу GitHub
+            window.open(`https://gist.github.com/${gistId}`, "_blank");
+            return;
+        }
+    };
+    document.getElementById("video-url").onkeypress = loadVideo;
+    document.getElementById("add-annotation").onclick = addAnnotation;
+
+    // YouTube API
+    function onYouTubeIframeAPIReady() {
+        player = new YT.Player("player", {
+            events: {
+                onReady: (e) => {
+                    playerReady = true;
+                },
+                onStateChange: (e) => {
+                    if (e.data === YT.PlayerState.PLAYING)
+                        updateActiveLoop();
+                },
+            },
+        });
+    }
+
+    let loopTimer;
+
+    function updateActiveLoop() {
+        clearInterval(loopTimer);
+        loopTimer = setInterval(() => {
+            if (!playerReady) return;
+            const t = Math.floor(player.getCurrentTime());
+            const idx = annotations.findIndex(
+                (a, i, arr) =>
+                    t >= a.time &&
+                    (i === arr.length - 1 || t < arr[i + 1].time),
+            );
+            if (idx !== activeIndex) {
+                activeIndex = idx;
+                renderAnnotations();
+                if (idx >= 0)
+                    document
+                        .getElementById("annotations")
+                        .children[idx]?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "nearest",
+                    });
+            }
+        }, 500);
+    }
+
+    // клавиши
+    document.addEventListener("keydown", (e) => {
+        const tag = e.target.tagName;
+        if (tag === "TEXTAREA") {
+            if ((e.ctrlKey || e.metaKey) && e.code === "Enter") {
+                e.target.parentElement.parentElement.querySelector(".edit-btn").click()
+            }
+            return
+        }
+        if (tag === "INPUT") return;
+        if (!playerReady) return;
+        if (e.code === "Space") {
+            e.preventDefault();
+            const state = player.getPlayerState();
+            if (state === YT.PlayerState.PLAYING) player.pauseVideo();
+            else player.playVideo();
+        } else if (e.code === "ArrowRight") {
+            player.seekTo(player.getCurrentTime() + 5, true);
+        } else if (e.code === "ArrowLeft") {
+            player.seekTo(
+                Math.max(0, player.getCurrentTime() - 5),
+                true,
+            );
+        }
+    });
+
+    async function loadGistIfNeeded() {
+        const savedGistId = localStorage.getItem("last_gist_id");
+
+        // если gist не указан — загружаем локальное состояние
+        if (!gistId) {
+            loadState();
+            if (!editMode)
+                document
+                    .getElementById("toolbar")
+                    .classList.add("hidden");
+            return;
+        }
+
+        // если gist совпадает с сохранённым — пропускаем загрузку
+        if (gistId === savedGistId) {
+            console.log(
+                "Gist совпадает с сохранённым, пропускаем загрузку.",
+            );
+            loadState();
+            if (!editMode)
+                document
+                    .getElementById("toolbar")
+                    .classList.add("hidden");
+            return;
+        }
+
+        try {
+            const res = await fetch(
+                `https://api.github.com/gists/${gistId}`,
+            );
+            const gist = await res.json();
+            const file = Object.values(gist.files)[0];
+            const data = JSON.parse(file.content);
+            annotations = data.annotations || [];
+            document.getElementById("video-url").value =
+                data.videoUrl || "";
+            loadVideo();
+            renderAnnotations();
+
+            // сохраняем gist ID и текущее состояние
+            localStorage.setItem("last_gist_id", gistId);
+            saveState();
+        } catch (e) {
+            console.error(e);
+            alert("Не удалось загрузить gist");
+        }
+    }
+
+    loadGistIfNeeded();
+</script>
+<script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
